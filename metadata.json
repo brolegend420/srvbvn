@@ -1,0 +1,8 @@
+
+{
+  "name": "Saravanaa Bhavan - AI Order Agent",
+  "description": "Authentic South Indian vegetarian ordering assistant representing the global legacy of Saravanaa Bhavan. Order in English, Tamil, Telugu, Hindi, or Kannada.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
