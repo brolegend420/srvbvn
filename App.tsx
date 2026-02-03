@@ -37,17 +37,23 @@ const App: React.FC = () => {
       let newCart = [...prev];
       
       updates.forEach(update => {
-        const menuItem = MENU_ITEMS.find(m => m.name.toLowerCase() === update.name.toLowerCase());
-        if (!menuItem) return;
+        // More resilient matching: trim and case-insensitive
+        const cleanUpdateName = update.name.trim().toLowerCase();
+        const menuItem = MENU_ITEMS.find(m => m.name.toLowerCase() === cleanUpdateName);
+        
+        if (!menuItem) {
+          console.warn(`Voice agent tried to add unknown item: ${update.name}`);
+          return;
+        }
 
         const existingIndex = newCart.findIndex(i => i.id === menuItem.id);
         if (update.quantity <= 0) {
           if (existingIndex > -1) newCart.splice(existingIndex, 1);
         } else {
           if (existingIndex > -1) {
-            newCart[existingIndex] = { ...newCart[existingIndex], quantity: update.quantity };
+            newCart[existingIndex] = { ...newCart[existingIndex], quantity: Math.round(update.quantity) };
           } else {
-            newCart.push({ ...menuItem, quantity: update.quantity });
+            newCart.push({ ...menuItem, quantity: Math.round(update.quantity) });
           }
         }
       });
@@ -74,7 +80,6 @@ const App: React.FC = () => {
               </div>
             </div>
 
-            {/* Category Tabs */}
             <div className="flex flex-wrap gap-2 mb-8 border-b border-slate-200 pb-4">
               {categories.map(cat => (
                 <button
@@ -114,7 +119,6 @@ const App: React.FC = () => {
           </div>
         </aside>
 
-        {/* Floating Voice Agent */}
         <div className="fixed bottom-6 right-6 z-[60] w-[350px] max-w-[calc(100vw-3rem)]">
           <VoiceAgent 
             onUpdateCart={updateCartViaVoice} 

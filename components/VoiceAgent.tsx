@@ -3,7 +3,6 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { GoogleGenAI, LiveServerMessage, Modality, Type, FunctionDeclaration } from '@google/genai';
 import { SYSTEM_INSTRUCTION } from '../constants';
 
-// Native Web APIs for base64
 function encode(bytes: Uint8Array) {
   let binary = '';
   const len = bytes.byteLength;
@@ -29,7 +28,7 @@ async function decodeAudioData(
   sampleRate: number,
   numChannels: number,
 ): Promise<AudioBuffer> {
-  const dataInt16 = new Int16Array(data.buffer);
+  const dataInt16 = new Int16Array(data.buffer, data.byteOffset, data.byteLength / 2);
   const frameCount = dataInt16.length / numChannels;
   const buffer = ctx.createBuffer(numChannels, frameCount, sampleRate);
 
@@ -57,7 +56,6 @@ const VoiceAgent: React.FC<VoiceAgentProps> = ({ onUpdateCart, isActive, setIsAc
   const nextStartTimeRef = useRef<number>(0);
   const sourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
   const sessionRef = useRef<any>(null);
-  const transcriptionRef = useRef<{ user: string; model: string }>({ user: '', model: '' });
 
   const updateCartFunctionDeclaration: FunctionDeclaration = {
     name: 'update_cart',
@@ -83,9 +81,7 @@ const VoiceAgent: React.FC<VoiceAgentProps> = ({ onUpdateCart, isActive, setIsAc
 
   const stopConversation = useCallback(() => {
     if (sessionRef.current) {
-      try {
-        sessionRef.current.close();
-      } catch (e) {}
+      try { sessionRef.current.close(); } catch (e) {}
       sessionRef.current = null;
     }
     
@@ -111,7 +107,6 @@ const VoiceAgent: React.FC<VoiceAgentProps> = ({ onUpdateCart, isActive, setIsAc
     setIsActive(false);
     setIsConnecting(false);
     setVolume(0);
-    transcriptionRef.current = { user: '', model: '' };
   }, [setIsActive]);
 
   const getTimeOfDayGreeting = () => {
@@ -122,27 +117,16 @@ const VoiceAgent: React.FC<VoiceAgentProps> = ({ onUpdateCart, isActive, setIsAc
   };
 
   const startConversation = async () => {
-    if (!process.env.API_KEY) {
-      console.error("Gemini API Key is missing in process.env.API_KEY");
-      alert("Configuration error: API Key is missing. Please ensure your environment is set up correctly.");
-      return;
-    }
-
-    if (isConnecting || isActive) return;
+    if (!process.env.API_KEY || isConnecting || isActive) return;
 
     setIsConnecting(true);
     
     try {
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        throw new Error("Microphone access is not supported by this browser or requires a secure (HTTPS) connection.");
-      }
-
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       
       const inputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
       const outputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
       
-      // Resume contexts to handle browser autoplay policies
       await inputCtx.resume();
       await outputCtx.resume();
 
@@ -161,19 +145,18 @@ const VoiceAgent: React.FC<VoiceAgentProps> = ({ onUpdateCart, isActive, setIsAc
           tools: [{ functionDeclarations: [updateCartFunctionDeclaration] }],
           speechConfig: {
             voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } }
-          },
-          outputAudioTranscription: {},
-          inputAudioTranscription: {}
+          }
         },
         callbacks: {
           onopen: () => {
             setIsConnecting(false);
             setIsActive(true);
             
+            // Send initial trigger immediately
             sessionPromise.then(session => {
-              session.sendRealtimeInput([{ 
-                text: `[START_CALL] ${getTimeOfDayGreeting()}. Proceed with your opening greeting sequence immediately.` 
-              }]);
+              session.sendRealtimeInput({
+                parts: [{ text: `[START_CALL] Current time is ${getTimeOfDayGreeting()}.` }]
+              });
             });
 
             source.connect(scriptProcessor);
@@ -192,32 +175,34 @@ const VoiceAgent: React.FC<VoiceAgentProps> = ({ onUpdateCart, isActive, setIsAc
                 data: encode(new Uint8Array(int16.buffer)),
                 mimeType: 'audio/pcm;rate=16000'
               };
+              
+              // CRITICAL: Rely solely on sessionPromise
               sessionPromise.then(session => {
-                if (sessionRef.current) {
-                  session.sendRealtimeInput({ media: pcmBlob });
-                }
+                session.sendRealtimeInput({ media: pcmBlob });
               });
             };
           },
           onmessage: async (message: LiveServerMessage) => {
-            const audioData = message.serverContent?.modelTurn?.parts[0]?.inlineData?.data;
-            if (audioData && outputAudioContextRef.current) {
-              const ctx = outputAudioContextRef.current;
-              nextStartTimeRef.current = Math.max(nextStartTimeRef.current, ctx.currentTime);
-              const buffer = await decodeAudioData(decode(audioData), ctx, 24000, 1);
-              const sourceNode = ctx.createBufferSource();
-              sourceNode.buffer = buffer;
-              sourceNode.connect(ctx.destination);
-              sourceNode.addEventListener('ended', () => sourcesRef.current.delete(sourceNode));
-              sourceNode.start(nextStartTimeRef.current);
-              nextStartTimeRef.current += buffer.duration;
-              sourcesRef.current.add(sourceNode);
+            // Find and process audio parts
+            if (message.serverContent?.modelTurn?.parts) {
+              for (const part of message.serverContent.modelTurn.parts) {
+                if (part.inlineData?.data && outputAudioContextRef.current) {
+                  const ctx = outputAudioContextRef.current;
+                  nextStartTimeRef.current = Math.max(nextStartTimeRef.current, ctx.currentTime);
+                  const buffer = await decodeAudioData(decode(part.inlineData.data), ctx, 24000, 1);
+                  const sourceNode = ctx.createBufferSource();
+                  sourceNode.buffer = buffer;
+                  sourceNode.connect(ctx.destination);
+                  sourceNode.addEventListener('ended', () => sourcesRef.current.delete(sourceNode));
+                  sourceNode.start(nextStartTimeRef.current);
+                  nextStartTimeRef.current += buffer.duration;
+                  sourcesRef.current.add(sourceNode);
+                }
+              }
             }
 
             if (message.serverContent?.interrupted) {
-              sourcesRef.current.forEach(s => {
-                try { s.stop(); } catch(e) {}
-              });
+              sourcesRef.current.forEach(s => { try { s.stop(); } catch(e) {} });
               sourcesRef.current.clear();
               nextStartTimeRef.current = 0;
             }
@@ -225,48 +210,25 @@ const VoiceAgent: React.FC<VoiceAgentProps> = ({ onUpdateCart, isActive, setIsAc
             if (message.toolCall) {
               for (const fc of message.toolCall.functionCalls) {
                 if (fc.name === 'update_cart') {
-                  const args = fc.args as { updates: { name: string; quantity: number }[] };
-                  onUpdateCart(args.updates);
+                  onUpdateCart((fc.args as any).updates);
                   sessionPromise.then(s => s.sendToolResponse({
                     functionResponses: {
                       id: fc.id,
                       name: fc.name,
-                      response: { result: "Shopping cart updated successfully." }
+                      response: { result: "ok" }
                     }
                   }));
                 }
               }
             }
-
-            if (message.serverContent?.inputTranscription) {
-              transcriptionRef.current.user += message.serverContent.inputTranscription.text;
-            }
-            if (message.serverContent?.outputTranscription) {
-              transcriptionRef.current.model += message.serverContent.outputTranscription.text;
-            }
-
-            if (message.serverContent?.turnComplete) {
-              const transcript = transcriptionRef.current.model;
-              if (transcript && transcript.toUpperCase().includes('SB-IRV-')) {
-                setTimeout(() => stopConversation(), 8000);
-              }
-              transcriptionRef.current = { user: '', model: '' };
-            }
           },
-          onclose: (e) => {
-            console.log("Live session closed", e);
-            stopConversation();
-          },
-          onerror: (e) => {
-            console.error("Live session error:", e);
-            stopConversation();
-          }
+          onclose: () => stopConversation(),
+          onerror: () => stopConversation()
         }
       });
       sessionRef.current = await sessionPromise;
     } catch (err) {
-      console.error("VoiceAgent Error:", err);
-      alert(`Could not start voice session: ${err instanceof Error ? err.message : "Unknown error"}`);
+      console.error("Voice Initialization Error:", err);
       setIsConnecting(false);
       stopConversation();
     }
@@ -281,10 +243,9 @@ const VoiceAgent: React.FC<VoiceAgentProps> = ({ onUpdateCart, isActive, setIsAc
       <button 
         onClick={isActive || isConnecting ? stopConversation : startConversation}
         disabled={isConnecting}
-        className={`w-20 h-20 rounded-full flex items-center justify-center text-3xl text-white shadow-[0_15px_40px_rgba(0,0,0,0.2)] transition-all transform hover:scale-105 active:scale-95 relative z-50 ${
+        className={`w-20 h-20 rounded-full flex items-center justify-center text-3xl text-white shadow-2xl transition-all transform hover:scale-105 active:scale-95 relative z-50 ${
           isActive ? 'bg-red-600' : 'bg-amber-800 hover:bg-amber-900'
         } ${isConnecting ? 'cursor-wait' : ''}`}
-        aria-label={isActive ? "End call" : "Start ordering"}
       >
         {isConnecting ? (
           <i className="fas fa-circle-notch fa-spin"></i>
@@ -304,18 +265,8 @@ const VoiceAgent: React.FC<VoiceAgentProps> = ({ onUpdateCart, isActive, setIsAc
       </button>
       
       {(isActive || isConnecting) && (
-        <span className="mt-3 text-[10px] font-bold text-amber-900 uppercase tracking-widest bg-white/90 backdrop-blur-sm px-3 py-1.5 rounded-full shadow-lg border border-amber-100 animate-fadeIn flex items-center gap-2">
-          {isConnecting ? (
-            <>
-              <i className="fas fa-sync fa-spin"></i>
-              Connecting...
-            </>
-          ) : (
-            <>
-              <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse"></span>
-              Ordering Live
-            </>
-          )}
+        <span className="mt-3 text-[10px] font-bold text-amber-900 uppercase tracking-widest bg-white/90 backdrop-blur-sm px-4 py-2 rounded-full shadow-lg border border-amber-100 animate-fadeIn">
+          {isConnecting ? 'Establishing Line...' : 'Saravanaa Bhavan Live'}
         </span>
       )}
     </div>
